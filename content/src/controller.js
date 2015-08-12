@@ -14,7 +14,8 @@ var $                = require('jquery'),
     pencilTracer     = require('pencil-tracer'),
     icedCoffeeScript = require('iced-coffee-script'),
     drawProtractor   = require('draw-protractor'),
-    cache          = require('cache');
+    cache            = require('cache'),
+    bcrypt           = require('bcrypt');
 
 
 eval(see.scope('controller'));
@@ -533,13 +534,13 @@ view.on('login', function() {
     return;
   }
   view.showLoginDialog({
-    prompt: 'Log in.',
+    prompt: 'Log in',
     username: model.ownername,
     validate: function(state) { return {}; },
     switchuser: signUpAndSave,
     done: function(state) {
       model.username = model.ownername;
-      model.passkey = keyFromPassword(model.username, state.password);
+      model.passkey = keyFromBcrypt(state.password, bcryptRounds);
       state.update({info: 'Logging in...', disable: true});
       storage.setPassKey(
           model.username, model.passkey, model.passkey,
@@ -581,8 +582,8 @@ view.on('setpass', function() {
       }
     },
     done: function(state) {
-      var oldpasskey = keyFromPassword(model.ownername, state.password);
-      var newpasskey = keyFromPassword(model.ownername, state.newpass);
+      var oldpasskey = keyFromBcrypt(state.password, bcryptRounds);
+      var newpasskey = keyFromBcrypt(state.password, bcryptRounds);
       state.update({info: 'Changing password...', disable: true});
       storage.setPassKey(model.ownername, newpasskey, oldpasskey,
       function(m) {
@@ -856,6 +857,7 @@ function saveAction(forceOverwrite, loginPrompt, doneCallback) {
 }
 
 function keyFromPassword(username, p) {
+  console.log("Keyfrompass");
   if (!p) { return ''; }
   if (/^[0-9]{3}$/.test(p)) { return p; }
   var key = '';
@@ -864,6 +866,12 @@ function keyFromPassword(username, p) {
     key += Math.floor(prng() * 10);
   }
   return key;
+}
+
+var bcryptRounds = 10;
+function keyFromBcrypt(p, rounds) {
+  console.log("keyfrombcrypt");
+  return bcrypt.hashSync(p, rounds);
 }
 
 function letterComplexity(s) {
@@ -1075,7 +1083,7 @@ function signUpAndSave(options) {
       }
       var rename = state.rename || mp.filename;
       var forceOverwrite = (username != model.ownername) || specialowner();
-      var key = keyFromPassword(username, state.password);
+      var key = keyFromBcrypt(state.password, bcryptRounds);
       var step2 = function() {
         storage.saveFile(
             username, rename, $.extend({}, doc),
@@ -1221,7 +1229,7 @@ function logInAndSave(filename, newdata, forceOverwrite,
     validate: function(state) { return {}; },
     done: function(state) {
       model.username = model.ownername;
-      model.passkey = keyFromPassword(model.username, state.password);
+      model.passkey = keyFromBcrypt(state.password, bcryptRounds);
       state.update({info: 'Saving....', disable: true});
       storage.saveFile(
           model.username, filename, newdata, forceOverwrite,
@@ -1563,7 +1571,7 @@ function logInAndMove(filename, newfilename, completeRename) {
     validate: function(state) { return {}; },
     done: function(state) {
       model.username = model.ownername;
-      model.passkey = keyFromPassword(model.username, state.password);
+      model.passkey = keyFromBcrypt(state.password, bcryptRounds);
       state.update({info: 'Renaming....', disable: true});
       storage.moveFile(
           model.ownername, filename, newfilename, model.passkey, false,

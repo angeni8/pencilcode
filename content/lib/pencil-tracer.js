@@ -83,8 +83,24 @@
       return null;
     };
 
+    CoffeeScriptInstrumenter.prototype.isFunctionDef = function(node) {
+      return node instanceof this.nodeTypes.Assign && !node.context && node.variable instanceof this.nodeTypes.Value && node.variable.base instanceof this.nodeTypes.Literal && node.variable.properties.length === 0 && node.value instanceof this.nodeTypes.Code;
+    };
+
+    CoffeeScriptInstrumenter.prototype.soakify = function(name) {
+      if (name.indexOf(".") === -1) {
+        return "(if typeof " + name + " is 'undefined' then undefined else " + name + ")";
+      } else {
+        return name.replace(/\./g, "?.");
+      }
+    };
+
+    CoffeeScriptInstrumenter.prototype.quoteString = function(str) {
+      return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n");
+    };
+
     CoffeeScriptInstrumenter.prototype.createInstrumentedNode = function(eventType, options) {
-      var eventObj, extra, f, functionCalls, instrumentedNode, location, locationObj, name, ref, ref1, ref2, soakify, vars;
+      var eventObj, extra, f, funcDef, functionCalls, instrumentedNode, location, locationObj, name, ref, ref1, ref2, vars;
       if (options == null) {
         options = {};
       }
@@ -102,26 +118,20 @@
       locationObj += " first_column: " + (location.first_column + 1) + ",";
       locationObj += " last_line: " + (location.last_line + 1) + ",";
       locationObj += " last_column: " + (location.last_column + 1) + " }";
-      soakify = function(name) {
-        if (name.indexOf(".") === -1) {
-          return "(if typeof " + name + " is 'undefined' then undefined else " + name + ")";
-        } else {
-          return name.replace(/\./g, "?.");
-        }
-      };
       extra = (function() {
         switch (eventType) {
           case "before":
           case "after":
+            funcDef = this.isFunctionDef(options.node) ? ", functionDef: true" : "";
             return "vars: [" + ((function() {
               var j, len, results;
               results = [];
               for (j = 0, len = vars.length; j < len; j++) {
                 name = vars[j];
-                results.push("{name: '" + name + "', value: " + (soakify(name)) + "}");
+                results.push("{name: '" + name + "', value: " + (this.soakify(name)) + " " + funcDef + "}");
               }
               return results;
-            })()) + "]";
+            }).call(this)) + "]";
           case "enter":
             return "vars: [" + ((function() {
               var j, len, results;
@@ -135,17 +145,29 @@
           case "leave":
             return "returnOrThrow: " + options.returnOrThrowVar;
         }
-      })();
+      }).call(this);
       if (eventType === "after") {
-        extra += ", functionCalls: [" + ((function() {
-          var j, len, results;
-          results = [];
-          for (j = 0, len = functionCalls.length; j < len; j++) {
-            f = functionCalls[j];
-            results.push("{name: '" + f.name + "', value: " + f.tempVar + "}");
-          }
-          return results;
-        })()) + "]";
+        if (this.options.includeArgsStrings) {
+          extra += ", functionCalls: [" + ((function() {
+            var j, len, results;
+            results = [];
+            for (j = 0, len = functionCalls.length; j < len; j++) {
+              f = functionCalls[j];
+              results.push("{name: '" + f.name + "', value: " + f.tempVar + ", argsString: '" + (this.quoteString(f.argsString)) + "'}");
+            }
+            return results;
+          }).call(this)) + "]";
+        } else {
+          extra += ", functionCalls: [" + ((function() {
+            var j, len, results;
+            results = [];
+            for (j = 0, len = functionCalls.length; j < len; j++) {
+              f = functionCalls[j];
+              results.push("{name: '" + f.name + "', value: " + f.tempVar + "}");
+            }
+            return results;
+          })()) + "]";
+        }
       }
       eventObj = "{ location: " + locationObj + ", type: '" + eventType + "', " + extra + " }";
       instrumentedNode = this.coffee.nodes(this.options.traceFunc + "(" + eventObj + ")").expressions[0];
@@ -243,6 +265,28 @@
       return args;
     };
 
+    CoffeeScriptInstrumenter.prototype.substringByLocation = function(location) {
+      var j, lineNum, ref, ref1, result;
+      result = "";
+      for (lineNum = j = ref = location.first_line, ref1 = location.last_line; ref <= ref1 ? j <= ref1 : j >= ref1; lineNum = ref <= ref1 ? ++j : --j) {
+        result += lineNum === location.first_line && lineNum === location.last_line ? this.lines[lineNum].slice(location.first_column, +location.last_column + 1 || 9e9) : lineNum === location.first_line ? this.lines[lineNum].slice(location.first_column) : lineNum === location.last_line ? this.lines[lineNum].slice(0, +location.last_column + 1 || 9e9) : this.lines[lineNum];
+      }
+      return result;
+    };
+
+    CoffeeScriptInstrumenter.prototype.argsToString = function(argNodes) {
+      var arg;
+      return ((function() {
+        var j, len, results;
+        results = [];
+        for (j = 0, len = argNodes.length; j < len; j++) {
+          arg = argNodes[j];
+          results.push(this.substringByLocation(arg.locationData));
+        }
+        return results;
+      }).call(this)).join(", ");
+    };
+
     CoffeeScriptInstrumenter.prototype.findFunctionCalls = function(node, parent, grandparent, vars) {
       var j, lastProp, len, name, prop, ref, soak;
       if (parent == null) {
@@ -280,7 +324,8 @@
           node.pencilTracerReturnVar = this.temporaryVariable("returnVar");
           vars.push({
             name: name,
-            tempVar: node.pencilTracerReturnVar
+            tempVar: node.pencilTracerReturnVar,
+            argsString: this.argsToString(node.args)
           });
         }
       }
@@ -347,7 +392,7 @@
     };
 
     CoffeeScriptInstrumenter.prototype.compileAst = function(ast, originalCode, compileOptions) {
-      var SourceMap, answer, compilerName, currentColumn, currentLine, fragment, fragments, header, j, js, len, map, newLines;
+      var SourceMap, compilerName, currentColumn, currentLine, fragment, fragments, header, j, js, len, map, newLines;
       SourceMap = this.coffee.compile("", {
         sourceMap: true
       }).sourceMap.constructor;
@@ -388,12 +433,10 @@
         js = "// " + header + "\n" + js;
       }
       if (compileOptions.sourceMap) {
-        answer = {
-          js: js
+        return {
+          code: js,
+          map: map.generate(compileOptions, originalCode)
         };
-        answer.sourceMap = map;
-        answer.v3SourceMap = map.generate(compileOptions, originalCode);
-        return answer;
       } else {
         return js;
       }
@@ -634,6 +677,7 @@
         sourceMap: this.options.sourceMap,
         literate: this.options.literate
       };
+      this.lines = code.match(/^.*((\r\n|\n|\r)|$)/gm);
       this.referencedVars = csOptions.referencedVars = (function() {
         var j, len, ref, results;
         ref = this.coffee.tokens(code, csOptions);
@@ -731,8 +775,37 @@
       }
     };
 
+    JavaScriptInstrumenter.prototype.isFunctionDef = function(node) {
+      var ref;
+      return (node != null ? node.type : void 0) === "FunctionDeclaration" || ((node != null ? node.type : void 0) === "VariableDeclaration" && node.declarations.length === 1 && ((ref = node.declarations[0].init) != null ? ref.type : void 0) === "FunctionExpression");
+    };
+
+    JavaScriptInstrumenter.prototype.soakify = function(name) {
+      var closeParens, expr, i, j, parts, ref, soakified;
+      soakified = "";
+      closeParens = "";
+      parts = name.split(".");
+      for (i = j = 0, ref = parts.length; 0 <= ref ? j < ref : j > ref; i = 0 <= ref ? ++j : --j) {
+        expr = parts.slice(0, +i + 1 || 9e9).join(".");
+        if (i === 0) {
+          expr = "(typeof " + expr + " === 'undefined' ? void 0 : " + expr + ")";
+        }
+        if (i === parts.length - 1) {
+          soakified += expr;
+        } else {
+          soakified += "((typeof " + expr + " === 'undefined' || " + expr + " === null) ? " + expr + " : ";
+          closeParens += ")";
+        }
+      }
+      return soakified + closeParens;
+    };
+
+    JavaScriptInstrumenter.prototype.quoteString = function(str) {
+      return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n");
+    };
+
     JavaScriptInstrumenter.prototype.createInstrumentedNode = function(eventType, options) {
-      var eventObj, extra, f, functionCalls, instrumentedNode, loc, locationObj, name, ref, ref1, ref2, soakify, vars;
+      var eventObj, extra, f, funcDef, functionCalls, instrumentedNode, loc, locationObj, name, ref, ref1, ref2, vars;
       if (options == null) {
         options = {};
       }
@@ -747,38 +820,20 @@
       locationObj += " first_column: " + (loc.start.column + 1) + ",";
       locationObj += " last_line: " + loc.end.line + ",";
       locationObj += " last_column: " + (loc.end.column + 1) + " }";
-      soakify = function(name) {
-        var closeParens, expr, i, j, parts, ref3, soakified;
-        soakified = "";
-        closeParens = "";
-        parts = name.split(".");
-        for (i = j = 0, ref3 = parts.length; 0 <= ref3 ? j < ref3 : j > ref3; i = 0 <= ref3 ? ++j : --j) {
-          expr = parts.slice(0, +i + 1 || 9e9).join(".");
-          if (i === 0) {
-            expr = "(typeof " + expr + " === 'undefined' ? void 0 : " + expr + ")";
-          }
-          if (i === parts.length - 1) {
-            soakified += expr;
-          } else {
-            soakified += "((typeof " + expr + " === 'undefined' || " + expr + " === null) ? " + expr + " : ";
-            closeParens += ")";
-          }
-        }
-        return soakified + closeParens;
-      };
       extra = (function() {
         switch (eventType) {
           case "before":
           case "after":
+            funcDef = this.isFunctionDef(options.node) ? ", functionDef: true" : "";
             return "vars: [" + ((function() {
               var j, len, results;
               results = [];
               for (j = 0, len = vars.length; j < len; j++) {
                 name = vars[j];
-                results.push("{name: '" + name + "', value: " + (soakify(name)) + "}");
+                results.push("{name: '" + name + "', value: " + (this.soakify(name)) + " " + funcDef + "}");
               }
               return results;
-            })()) + "]";
+            }).call(this)) + "]";
           case "enter":
             return "vars: [" + ((function() {
               var j, len, results;
@@ -792,17 +847,29 @@
           case "leave":
             return "returnOrThrow: " + options.returnOrThrowVar;
         }
-      })();
+      }).call(this);
       if (eventType === "after") {
-        extra += ", functionCalls: [" + ((function() {
-          var j, len, results;
-          results = [];
-          for (j = 0, len = functionCalls.length; j < len; j++) {
-            f = functionCalls[j];
-            results.push("{name: '" + f.name + "', value: " + f.tempVar + "}");
-          }
-          return results;
-        })()) + "]";
+        if (this.options.includeArgsStrings) {
+          extra += ", functionCalls: [" + ((function() {
+            var j, len, results;
+            results = [];
+            for (j = 0, len = functionCalls.length; j < len; j++) {
+              f = functionCalls[j];
+              results.push("{name: '" + f.name + "', value: " + f.tempVar + ", argsString: '" + (this.quoteString(f.argsString)) + "'}");
+            }
+            return results;
+          }).call(this)) + "]";
+        } else {
+          extra += ", functionCalls: [" + ((function() {
+            var j, len, results;
+            results = [];
+            for (j = 0, len = functionCalls.length; j < len; j++) {
+              f = functionCalls[j];
+              results.push("{name: '" + f.name + "', value: " + f.tempVar + "}");
+            }
+            return results;
+          })()) + "]";
+        }
       }
       eventObj = "{location: " + locationObj + ", type: '" + eventType + "', " + extra + "}";
       instrumentedNode = acorn.parse(this.options.traceFunc + "(" + eventObj + ");").body[0];
@@ -845,6 +912,7 @@
       node = acorn.parse(varName + " = 0;").body[0];
       node.expression.right = expr;
       node.expression.left.pencilTracerGenerated = true;
+      node.expression.loc = expr.loc;
       if (asStatement) {
         return node;
       } else {
@@ -946,6 +1014,28 @@
       return results;
     };
 
+    JavaScriptInstrumenter.prototype.substringByLocation = function(loc) {
+      var j, lineNum, ref, ref1, result;
+      result = "";
+      for (lineNum = j = ref = loc.start.line, ref1 = loc.end.line; ref <= ref1 ? j <= ref1 : j >= ref1; lineNum = ref <= ref1 ? ++j : --j) {
+        result += lineNum === loc.start.line && lineNum === loc.end.line ? this.lines[lineNum].slice(loc.start.column, loc.end.column) : lineNum === loc.start.line ? this.lines[lineNum].slice(loc.start.column) : lineNum === loc.end.line ? this.lines[lineNum].slice(0, loc.end.column) : this.lines[lineNum];
+      }
+      return result;
+    };
+
+    JavaScriptInstrumenter.prototype.argsToString = function(argNodes) {
+      var arg;
+      return ((function() {
+        var j, len, results;
+        results = [];
+        for (j = 0, len = argNodes.length; j < len; j++) {
+          arg = argNodes[j];
+          results.push(this.substringByLocation(arg.loc));
+        }
+        return results;
+      }).call(this)).join(", ");
+    };
+
     JavaScriptInstrumenter.prototype.findFunctionCalls = function(node, vars) {
       var child, j, key, len, name, ref, ref1, ref2;
       if (vars == null) {
@@ -955,7 +1045,8 @@
         name = node.callee.type === "ThisExpression" ? "this" : node.callee.type === "Identifier" ? node.callee.name : node.callee.type === "MemberExpression" && !node.callee.computed ? node.callee.property.name : "<anonymous>";
         vars.push({
           name: name,
-          tempVar: node.pencilTracerReturnVar
+          tempVar: node.pencilTracerReturnVar,
+          argsString: this.argsToString(node["arguments"])
         });
       }
       for (key in node) {
@@ -1019,6 +1110,13 @@
       }
       if ((ref1 = node.type) === "CallExpression" || ref1 === "NewExpression") {
         node.pencilTracerReturnVar = this.temporaryVariable("returnVar", true);
+      }
+      if (node.type === "ForStatement" && !node.test && !node.update) {
+        node.test = {
+          type: "Literal",
+          value: true,
+          loc: node.loc
+        };
       }
       return this.mapChildren(node, (function(_this) {
         return function(child) {
@@ -1126,11 +1224,14 @@
     };
 
     JavaScriptInstrumenter.prototype.instrument = function(filename, code) {
-      var ast, name, tempVarsDeclaration;
+      var ast, name, result, tempVarsDeclaration;
+      this.lines = code.match(/^.*((\r\n|\n|\r)|$)/gm);
+      this.lines.unshift(null);
       this.undeclaredVars = [];
       this.referencedVars = [];
       ast = acorn.parse(code, {
         locations: true,
+        sourceFile: filename,
         onToken: (function(_this) {
           return function(token) {
             if (token.type.label === "name" && _this.referencedVars.indexOf(token.value) === -1) {
@@ -1168,7 +1269,19 @@
       if (this.options.ast) {
         return ast;
       }
-      return escodegen.generate(ast);
+      if (this.options.sourceMap) {
+        if (typeof filename !== "string" || filename.length === 0) {
+          filename = "untitled.js";
+        }
+        result = escodegen.generate(ast, {
+          sourceMap: filename,
+          sourceMapWithCode: true
+        });
+        result.map = result.map.toString();
+        return result;
+      } else {
+        return escodegen.generate(ast);
+      }
     };
 
     return JavaScriptInstrumenter;
